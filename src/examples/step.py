@@ -21,8 +21,8 @@ tools = [
 from idw.alpaca.agent import AlpacaStepAgent, AlpacaInputStepAgent, AlpacaInputStepBreakdownAgent
 agent = AlpacaInputStepBreakdownAgent(llm=llm, tools=tools)
 # out = agent.query(input("> "))
-out = agent.query("What is the square root of brad pitt's age?")
-# out = agent.query("who is CEO of the company that tuned hermes 13b?")
+# out = agent.query("What is the square root of brad pitt's age?")
+out = agent.query("who is CEO of the company that tuned hermes 13b?")
 # out = agent.query("what happened to project veritas after james left?")
 # out = agent.query("Who was James O'Keefe and what was his role in Project Veritas?")
 # out = agent.query("summarize project defuse")
