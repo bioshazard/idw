@@ -15,7 +15,7 @@ from idw.alpaca.tools import useGoogleSearch, useFakeTool
 tools = [
     useGoogleSearch(),
     useFakeTool(name="calculator", description="useful for calculation", output="7.68114"),
-    useFakeTool(name="submit", description="useful to submit the answer as the input", output=35)
+    useFakeTool(name="submit", description="once all tasks are resolved, submit the final answer", output=35)
 ]
 
 from idw.alpaca.agent import AlpacaStepAgent, AlpacaInputStepAgent, AlpacaInputStepBreakdownAgent
