@@ -7,10 +7,11 @@ This repo contains (so far) a few scratch attempts at a reliable QA agent w/ sea
 Very rough draft so far, but you can symlink the `idw` python library and try an example pretty simply:
 
 ```bash
-# run a llama-cpp-python.server with hermes 13b llama2 ggml 6k
+# Prep: run a llama-cpp-python.server with hermes 13b llama2 ggml 6k
+# Symlink module so `idw` can be imported from this repo
 pip install -e src/lib/idw
 cd src/examples
 cp -v env.dist .env
 # ^ be sure to configure your .env
-python src/examples/test.py
+python src/examples/step.py
 ```
