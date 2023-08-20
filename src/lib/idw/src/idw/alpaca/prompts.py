@@ -6,7 +6,7 @@ from langchain.prompts import PromptTemplate
 instruction = PromptTemplate(
     input_variables=["instruction", "response"],
     template="\n".join([
-        "### Instruction:", "{instruction}",
+        "### Instruction:", "{instruction}", "",
         "### Response:", "{response}"
     ])
 )
@@ -14,8 +14,8 @@ instruction = PromptTemplate(
 inputInstruction = PromptTemplate(
     input_variables=["instruction", "input", "response"],
     template="\n".join([
-        "### Instruction:", "{instruction}",
-        "### Input:", "{input}",
+        "### Instruction:", "{instruction}", "",
+        "### Input:", "{input}", "",
         "### Response:", "{response}"
     ])
 )

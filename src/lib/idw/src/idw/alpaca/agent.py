@@ -287,4 +287,557 @@ class AlpacaStepAgent:
         if not tool:
             raise Exception(f"'{toolName}' not a valid tool")
         return tool.func(inputText)
+
+class AlpacaInputStepAgent:
+    def __init__(self, llm, tools):
+        self.llm = llm
+        self.tools = tools
+
+    def query(self, query):
+        self.notes = [
+            # "Brad Pitt age is 59 as of June 2023",
+            # "The square root of 59 is 7.68114"
+        ]
+        return self.step({ "query": query })
+    
+    def step(self, action):
+
+        # # Init Step Chain, prompt is built dynamically from parts
+        presponse=json.dumps({
+            "question": action["query"],
+            "observations": self.notes,
+            "observationsSummary": "",
+        }, indent=2)[:-3]
+        prompt = prompts.inputInstruction.partial(response=presponse)
+        chain = LLMChain(llm=self.llm, prompt=prompt, verbose=True)
+
+        # # Instruction parts
+        instructionParts = []
+
+        # ## Tool list
+        instructionParts.append("\n".join([
+            "Answer the following questions as best you can. You have access to the following actions:",
+            "\n".join([f"- {tool.name}: {tool.description}" for tool in self.tools]), 
+        ]))
+
+        toolNameList = "|".join([tool.name for tool in self.tools])
+        instructionParts.append("\n".join([
+            "Respond with only a JSON object as follows:",
+            json.dumps({
+                "question": "the input question you must answer",
+                # "thought": "you should always think about what to do",
+                # "thought": "<you should always think about what to do>",
+                # "thought": "<WHAT DO THE 'Observations:' IMPLY ABOUT WHAT ACTION TO TAKE?>",
+                "observationsSummary": "<summary of observations>",
+                "answerKnown": "<DO I KNOW THE FINAL ANSWER YET?>",
+                "breakdown": "<WHAT INFO PARTS DO I NEED TO ANSWER?>",
+                "thought": "<what is the very next action based on the observations>",
+                "action": f'the action to take, should be one of [{toolNameList}]',
+                # "actionInput": "the input to the action",
+                "actionInput": "<the string literal formatted input to the action>",
+            }, indent=2)
+        ]))
+
+        # # Input Parts
+        inputParts = []
         
+        if "query" in action:
+            inputParts.append(f'New question: {action["query"]}')
+        
+        ## Notes
+        if len(self.notes) > 0:
+            inputParts.append("\n".join([
+                "Observations:",
+                "\n".join([f"- {note}" for note in self.notes])
+            ]))
+        else:
+            inputParts.append("Notes: None yet! Can't answer until I have notes!")
+
+        # Compile prompt and submit for completion
+        completion = presponse + chain.run({
+            "instruction": "\n\n".join(instructionParts),
+            "input": "\n\n".join(inputParts),
+        })
+        print(completion)
+        llmOutput = json.loads(completion)
+
+        if llmOutput["action"] == "submit":
+            return llmOutput["actionInput"]
+    
+        # failsafe to just send the observation summary
+        if llmOutput["answerKnown"] == "yes":
+            return llmOutput["observationsSummary"]
+
+        # Run next tool
+        toolName = llmOutput["action"]
+        toolInput = llmOutput["actionInput"]
+        print("Run tool")
+        toolOutput = self.runTool(toolName, toolInput)
+        # print(toolOutput)
+        actionObjectInput = {
+            "thought": llmOutput["thought"],
+            "action": llmOutput["action"],
+            "actionInput": llmOutput["actionInput"],
+        }
+
+        # Separate observation processing chain (for now?)
+        toolPrompt = prompts.inputInstruction.partial(response="")
+        toolChain = LLMChain(llm=self.llm, prompt=toolPrompt, verbose=True)
+        observation = toolChain.run({
+            "instruction": "\n\n".join([
+                # "Concisely summarize this context as an `actionOutput` field to add to the JSON object. Respond with an updated JSON object including the new field and value.",
+                # "Respond with an updated JSON object to include a new field `actionOutput` as a laconic answer to the `actionInput` based on the context.",
+                # "Respond with only a parsable updated JSON object to include a new field `observation` with the value of the action answer.",
+                "Respond with only a valid JSON object updated to include a new field `observation` at the end with an extremely concise single string literal value based on the context.",
+            ]),
+            "input": "\n\n".join([
+                "\n".join([
+                    # "JSON Input Object:",
+                    # "```",
+                    json.dumps(actionObjectInput, indent=2),
+                    # "```"
+                ]),
+                "\n".join([
+                    "New Context:",
+                    toolOutput
+                ])
+            ])
+        })
+        print(observation)
+        toolOut = json.loads(observation)
+
+        self.notes.append(": ".join([
+            toolInput,
+            toolOut["observation"]
+        ]))
+        return self.step(action)
+    
+    def runTool(self, toolName, inputText):
+        tool = next((tool for tool in self.tools if tool.name == toolName), None)
+        if not tool:
+            raise Exception(f"'{toolName}' not a valid tool")
+        return tool.func(inputText)
+
+class AlpacaInputStepBreakdownAgent:
+    def __init__(self, llm, tools):
+        self.llm = llm
+        self.tools = tools
+
+    # def query(self, query):
+    #     self.notes = [
+    #         # "Brad Pitt age is 59 as of June 2023",
+    #         # "The square root of 59 is 7.68114"
+    #     ]
+    #     return self.step({ "query": query })
+    def query(self, query):
+        # Break the question down
+        self.query = query
+        self.tasksPending = self.decompose(query)
+        # self.tasksPending.append(query)
+        self.tasksResolved = []
+        # print(self.tasks)
+        # Answer each sub-item with tools
+        return self.resolve()
+
+    def decompose(self, query):
+        prompt = prompts.inputInstruction
+        chain = LLMChain(llm=self.llm, prompt=prompt, verbose=True)
+
+        format = json.dumps([
+            "<an introductory task>",
+            "<... zero or more additional tasks>",
+        ], indent=2)
+
+        instructionParts = []
+        instructionParts.append("\n".join([
+            # "of of" gives better results sometimes? lol
+            "Decompose the question into a list of of tasks to research the answer.",
+            "Respond only with a JSON object in this format:",
+            format
+        ]))
+
+        # Input
+        inputParts = []
+        inputParts.append(f"New Question: {query}")
+        # Completion
+        presponse = format[0] # prime with first char
+        completion = presponse + chain.run({
+            "instruction": "\n\n".join(instructionParts),
+            "input": "\n\n".join(inputParts),
+            "response": presponse,
+        })
+        print(completion)
+        return json.loads(completion)
+
+    def resolve(self):
+        prompt = prompts.inputInstruction
+        chain = LLMChain(llm=self.llm, prompt=prompt, verbose=True)
+        # Instruction
+        instructionParts = []
+        ## Tools
+        if len(self.tasksPending) > 0:
+            instructionParts.append("\n".join([
+                " ".join([
+                    "Resolve the unanswered tasks as best you can.",
+                    "You have access to the following actions:"
+                ]),
+                "\n".join([f"- {tool.name}: {tool.description}" for tool in self.tools]), 
+            ]))
+        else:
+            instructionParts.append("Answer the final question given the resolved task insights.")
+        ## Response Format
+        toolNameList = "|".join([tool.name for tool in self.tools])
+        instructionParts.append("\n".join([
+            "Respond with only a JSON object as follows:",
+            json.dumps({
+                "nextTask": "the next pending task you must resolve",
+                "thought": "<I should always think about what to do next>",
+                # "thought": "<what is the very next action based on the observations>",
+                "action": f'the action to take, should be one of [{toolNameList}]',
+                # "actionInput": "the input to the action",
+                "actionInput": "<the string literal formatted input to the action>",
+            }, indent=2)
+        ]))
+        # Input
+        inputParts = []
+        ## Tasks
+            
+        if len(self.tasksResolved) == 0:
+            inputParts.append("Resolved Tasks: None")
+        else:
+            inputParts.append("\n".join([
+                "Resolved Tasks:",
+                "\n".join([f"- {task}" for task in self.tasksResolved])
+            ]))
+            
+        if len(self.tasksPending) == 0:
+            inputParts.append("Pending Tasks: None")
+        else:
+            inputParts.append("\n".join([
+                "Pending Tasks:",
+                "\n".join([f"- {task}" for task in self.tasksPending])
+            ]))
+            
+        if len(self.tasksPending) > 0:
+            inputParts.append(" ".join([
+                "Next Task:",
+                self.tasksPending[0]
+            ]))
+        
+        # Add user question if no pending tasks
+        if len(self.tasksPending) == 0:
+            inputParts.append(f"Final Question: {self.query}")
+
+
+        ## Scratchpad
+        # TODO
+
+        # Completion
+        completion = chain.run({
+            "instruction": "\n\n".join(instructionParts),
+            "input": "\n\n".join(inputParts),
+            "response": "",
+        })
+        print(completion)
+        response = json.loads(completion)
+
+        # Process tool selection
+        # Run next tool
+        toolThought = response["thought"]
+        toolName = response["action"]
+        toolInput = response["actionInput"]
+
+        if toolName == "submit":
+            # print(toolInput)
+            return toolInput
+
+
+        toolOutput = self.runTool(toolName, toolInput)
+        # Process output as answer to latest task
+        observation = chain.run({
+            "instruction": "\n\n".join([
+                # "Determine the answer to the task from the context.",
+                "Determine the answer to the task from the tool output. Answer in as few words as possible to state just the fact.",
+            ]),
+            "input": "\n\n".join([
+                f"Thought: {toolThought}",
+                f"Tool: {toolName}",
+                f"Input: {toolInput}",
+                "\n".join([
+                    "Output:",
+                    "```",
+                    toolOutput,
+                    "```",
+                ])
+            ]),
+            "response": ""
+        })
+        nextTask = self.tasksPending.pop(0)
+        self.tasksResolved.append({
+            "task": nextTask,
+            "answer": observation
+        })
+        return self.resolve()
+
+
+        # # print(toolOutput)
+        # actionObjectInput = {
+        #     "thought": llmOutput["thought"],
+        #     "action": llmOutput["action"],
+        #     "actionInput": llmOutput["actionInput"],
+        # }
+
+        # # Separate observation processing chain (for now?)
+        # toolPrompt = prompts.inputInstruction.partial(response="")
+        # toolChain = LLMChain(llm=self.llm, prompt=toolPrompt, verbose=True)
+        # observation = toolChain.run({
+        #     "instruction": "\n\n".join([
+        #         # "Concisely summarize this context as an `actionOutput` field to add to the JSON object. Respond with an updated JSON object including the new field and value.",
+        #         # "Respond with an updated JSON object to include a new field `actionOutput` as a laconic answer to the `actionInput` based on the context.",
+        #         # "Respond with only a parsable updated JSON object to include a new field `observation` with the value of the action answer.",
+        #         "Respond with only a valid JSON object updated to include a new field `observation` at the end with an extremely concise single string literal value based on the context.",
+        #     ]),
+        #     "input": "\n\n".join([
+        #         "\n".join([
+        #             # "JSON Input Object:",
+        #             # "```",
+        #             json.dumps(actionObjectInput, indent=2),
+        #             # "```"
+        #         ]),
+        #         "\n".join([
+        #             "New Context:",
+        #             toolOutput
+        #         ])
+        #     ])
+        # })
+        # print(observation)
+        # toolOut = json.loads(observation)
+
+        # self.notes.append(": ".join([
+        #     toolInput,
+        #     toolOut["observation"]
+        # ]))
+        # return self.step(action)
+
+
+    
+    # we arent worried about decomposition here, done above
+    def zeroshot(self, query):
+        # Prep chain
+        presponse=""
+        promptJSON = prompts.inputInstruction.partial(response=presponse)
+        chain = LLMChain(llm=self.llm, prompt=promptJSON, verbose=True)
+        # Instruction
+        instructionParts = []
+        # Tools
+        instructionParts.append("\n".join([
+            " ".join([
+                "Answer the following questions as best you can.",
+                "You have access to the following actions:"
+            ]),
+            "\n".join([f"- {tool.name}: {tool.description}" for tool in self.tools]), 
+        ]))
+        ## Format
+        toolList = [tool.name for tool in self.tools]
+        instructionParts.append("\n".join([
+            "Use the following format:",
+            json.dumps({
+                "question": "the input question you must answer",
+                "questionDecomp": "comma separated list of all sub questions implied",
+                "next": "which of the parts should I act on next?",
+                "action": f'the action to take, should be one of [{"|".join(toolList)}]',
+                "actionInput": "the input to the action"
+            }, indent=2)
+        ]))
+
+        # Input
+        inputParts = []
+        inputParts.append(f"New Question: {action['query']}")
+        # Completion
+        completion = presponse + chain.run({
+            "instruction": "\n\n".join(instructionParts),
+            "input": "\n\n".join(inputParts)
+        })
+        print(completion)
+
+        
+        
+
+    
+    def step(self, action):
+        # Prime response to start with curly brace. We want JSON outputs.
+        # presponse="{"
+        presponse=""
+        promptJSON = prompts.inputInstruction.partial(response=presponse)
+        chain = LLMChain(llm=self.llm, prompt=promptJSON, verbose=True)
+        # Instruction
+        instructionParts = []
+        ## Tools
+        instructionParts.append("\n".join([
+            " ".join([
+                "Answer the following questions as best you can.",
+                "You have access to the following actions:"
+            ]),
+            "\n".join([f"- {tool.name}: {tool.description}" for tool in self.tools]), 
+        ]))
+        ## Format
+        # toolList = [tool.name for tool in self.tools]
+        # instructionParts.append("\n".join([
+        #     "Use the following format:",
+        #     json.dumps({
+        #         "question": "the input question you must answer",
+        #         "questionDecomp": "comma separated list of all sub questions implied",
+        #         "next": "which of the parts should I act on next?",
+        #         "action": f'the action to take, should be one of [{"|".join(toolList)}]',
+        #         "actionInput": "the input to the action"
+        #     }, indent=2)
+        # ]))
+        # DEBUG
+        # instructionParts = []
+        # instructionParts.append("\n".join([
+        #     "Decompose the question into simpler questions.",
+        #     "Respond only with a JSON object in this format:",
+        #     json.dumps([
+        #         "<An introductory question>",
+        #         "<... include zero or more follow up questions as needed to be comprehensive>",
+        #     ], indent=2)
+        # ]))
+        # DEBUG2
+        instructionParts = []
+        instructionParts.append("\n".join([
+            # "of of" gives better results sometimes? lol
+            "Decompose the question into a list of of tasks to research the answer.",
+            "Respond only with a JSON object in this format:",
+            json.dumps([
+                "<an introductory task>",
+                "<... zero or more additional tasks>",
+            ], indent=2)
+        ]))
+
+        # Input
+        inputParts = []
+        inputParts.append(f"New Question: {action['query']}")
+        # Completion
+        completion = presponse + chain.run({
+            "instruction": "\n\n".join(instructionParts),
+            "input": "\n\n".join(inputParts)
+        })
+        print(completion)
+
+    def step2(self, action):
+
+        # # Init Step Chain, prompt is built dynamically from parts
+        presponse=json.dumps({
+            "question": action["query"],
+            "observations": self.notes,
+            "observationsSummary": "",
+        }, indent=2)[:-3]
+        prompt = prompts.inputInstruction.partial(response=presponse)
+        chain = LLMChain(llm=self.llm, prompt=prompt, verbose=True)
+
+        # # Instruction parts
+        instructionParts = []
+
+        # ## Tool list
+        instructionParts.append("\n".join([
+            "Answer the following questions as best you can. You have access to the following actions:",
+            "\n".join([f"- {tool.name}: {tool.description}" for tool in self.tools]), 
+        ]))
+
+        toolNameList = "|".join([tool.name for tool in self.tools])
+        instructionParts.append("\n".join([
+            "Respond with only a JSON object as follows:",
+            json.dumps({
+                "question": "the input question you must answer",
+                # "thought": "you should always think about what to do",
+                # "thought": "<you should always think about what to do>",
+                # "thought": "<WHAT DO THE 'Observations:' IMPLY ABOUT WHAT ACTION TO TAKE?>",
+                "observationsSummary": "<summary of observations>",
+                "answerKnown": "<DO I KNOW THE FINAL ANSWER YET?>",
+                "breakdown": "<WHAT INFO PARTS DO I NEED TO ANSWER?>",
+                "thought": "<what is the very next action based on the observations>",
+                "action": f'the action to take, should be one of [{toolNameList}]',
+                # "actionInput": "the input to the action",
+                "actionInput": "<the string literal formatted input to the action>",
+            }, indent=2)
+        ]))
+
+        # # Input Parts
+        inputParts = []
+        
+        if "query" in action:
+            inputParts.append(f'New question: {action["query"]}')
+        
+        ## Notes
+        if len(self.notes) > 0:
+            inputParts.append("\n".join([
+                "Observations:",
+                "\n".join([f"- {note}" for note in self.notes])
+            ]))
+        else:
+            inputParts.append("Notes: None yet! Can't answer until I have notes!")
+
+        # Compile prompt and submit for completion
+        completion = presponse + chain.run({
+            "instruction": "\n\n".join(instructionParts),
+            "input": "\n\n".join(inputParts),
+        })
+        print(completion)
+        llmOutput = json.loads(completion)
+
+        if llmOutput["action"] == "submit":
+            return llmOutput["actionInput"]
+    
+        # failsafe to just send the observation summary
+        if llmOutput["answerKnown"] == "yes":
+            return llmOutput["observationsSummary"]
+
+        # Run next tool
+        toolName = llmOutput["action"]
+        toolInput = llmOutput["actionInput"]
+        print("Run tool")
+        toolOutput = self.runTool(toolName, toolInput)
+        # print(toolOutput)
+        actionObjectInput = {
+            "thought": llmOutput["thought"],
+            "action": llmOutput["action"],
+            "actionInput": llmOutput["actionInput"],
+        }
+
+        # Separate observation processing chain (for now?)
+        toolPrompt = prompts.inputInstruction.partial(response="")
+        toolChain = LLMChain(llm=self.llm, prompt=toolPrompt, verbose=True)
+        observation = toolChain.run({
+            "instruction": "\n\n".join([
+                # "Concisely summarize this context as an `actionOutput` field to add to the JSON object. Respond with an updated JSON object including the new field and value.",
+                # "Respond with an updated JSON object to include a new field `actionOutput` as a laconic answer to the `actionInput` based on the context.",
+                # "Respond with only a parsable updated JSON object to include a new field `observation` with the value of the action answer.",
+                "Respond with only a valid JSON object updated to include a new field `observation` at the end with an extremely concise single string literal value based on the context.",
+            ]),
+            "input": "\n\n".join([
+                "\n".join([
+                    # "JSON Input Object:",
+                    # "```",
+                    json.dumps(actionObjectInput, indent=2),
+                    # "```"
+                ]),
+                "\n".join([
+                    "New Context:",
+                    toolOutput
+                ])
+            ])
+        })
+        print(observation)
+        toolOut = json.loads(observation)
+
+        self.notes.append(": ".join([
+            toolInput,
+            toolOut["observation"]
+        ]))
+        return self.step(action)
+    
+    def runTool(self, toolName, inputText):
+        tool = next((tool for tool in self.tools if tool.name == toolName), None)
+        if not tool:
+            raise Exception(f"'{toolName}' not a valid tool")
+        return tool.func(inputText)
